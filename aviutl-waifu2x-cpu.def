@@ -1,0 +1,5 @@
+LIBRARY aviutl-waifu2x-cpu.auf
+
+EXPORTS
+	GetFilterTable @1
+
