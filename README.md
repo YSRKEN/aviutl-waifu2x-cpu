@@ -56,5 +56,5 @@ Ver.1.0
 ##参考にした資料
  * 「[SSEとAVXで高次元ベクトルの内積計算を高速化してみた](http://daily.belltail.jp/?p=1520)」
  * 「[組み込み関数（intrinsic）によるSIMD入門](http://www.slideshare.net/FukushimaNorishige/simd-10548373)」
- * 「[x86 SIMD Technique:: 水平加算での合計計算]((http://www.kaede-software.com/2014/04/post_641.html))」
+ * 「[x86 SIMD Technique:: 水平加算での合計計算](http://www.kaede-software.com/2014/04/post_641.html)」
  * 「[インテル® C++ コンパイラー XE 13.1 ユーザー・リファレンス・ガイド](http://nf.nci.org.au/facilities/software/intel-ct/13.5.192/Documentation/ja_JP/compiler_c/main_cls/index.htm)」
