@@ -5,6 +5,10 @@ VisualStudioVersion = 12.0.30501.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "aviutl-waifu2x-cpu-sse", "aviutl-waifu2x-cpu-sse\aviutl-waifu2x-cpu-sse.vcxproj", "{331DB875-728C-4EC4-82A3-755C480E2457}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "aviutl-waifu2x-cpu-avx", "aviutl-waifu2x-cpu-avx\aviutl-waifu2x-cpu-avx.vcxproj", "{87831D9B-BB4F-4988-B12C-9C9F81CDED3A}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "aviutl-waifu2x-cpu-fma", "aviutl-waifu2x-cpu-fma\aviutl-waifu2x-cpu-fma.vcxproj", "{53B7081A-0290-47D2-BEDF-6E030562821A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Win32 = Debug|Win32
@@ -15,6 +19,14 @@ Global
 		{331DB875-728C-4EC4-82A3-755C480E2457}.Debug|Win32.Build.0 = Debug|Win32
 		{331DB875-728C-4EC4-82A3-755C480E2457}.Release|Win32.ActiveCfg = Release|Win32
 		{331DB875-728C-4EC4-82A3-755C480E2457}.Release|Win32.Build.0 = Release|Win32
+		{87831D9B-BB4F-4988-B12C-9C9F81CDED3A}.Debug|Win32.ActiveCfg = Debug|Win32
+		{87831D9B-BB4F-4988-B12C-9C9F81CDED3A}.Debug|Win32.Build.0 = Debug|Win32
+		{87831D9B-BB4F-4988-B12C-9C9F81CDED3A}.Release|Win32.ActiveCfg = Release|Win32
+		{87831D9B-BB4F-4988-B12C-9C9F81CDED3A}.Release|Win32.Build.0 = Release|Win32
+		{53B7081A-0290-47D2-BEDF-6E030562821A}.Debug|Win32.ActiveCfg = Debug|Win32
+		{53B7081A-0290-47D2-BEDF-6E030562821A}.Debug|Win32.Build.0 = Debug|Win32
+		{53B7081A-0290-47D2-BEDF-6E030562821A}.Release|Win32.ActiveCfg = Release|Win32
+		{53B7081A-0290-47D2-BEDF-6E030562821A}.Release|Win32.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
