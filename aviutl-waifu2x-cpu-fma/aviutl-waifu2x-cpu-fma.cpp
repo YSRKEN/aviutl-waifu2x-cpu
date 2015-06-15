@@ -1,134 +1,116 @@
-/* waifu2x-cpu Ver.1.2 by YSR */
+/* waifu2x-cpu Ver.1.3 by YSR */
 
 /* プリプロセッサ */
+#pragma warning( disable: 4018)
+//C標準ライブラリ
+#include <cstdint>
 // STL
 #include <chrono>
-#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string>
-#include <vector>
 // Windows依存
 #include <tchar.h>
 #include <windows.h>
-// SIMD
-#include <immintrin.h>
+// SIMD関係
+#include "simd.h"
 // AviUtl関係
 #include "filter.h"
+
 #define kSoftName "waifu2x-cpu[FMA]"
-
-const int kTracks = 4;											//トラックバーの数
-TCHAR	*track_name[] = {"thread", "noise", "scale", "block"};	//トラックバーの名前
-int		track_default[] = {1, 0, 0, 32};						//トラックバーの初期値
-int		track_s[] = {1, 0, 0, 32};								//トラックバーの下限値
-int		track_e[] = {32, 2, 1, 256};							//トラックバーの上限値
-
-const int kChecks = 1;						//チェックボックスの数
-TCHAR	*check_name[] = {"use blocking"};	//チェックボックスの名前
-int		check_default[] = {0};				//チェックボックスの初期値 (値は0か1)
-
-/* テンプレ */
-FILTER_DLL filter = {
-	FILTER_FLAG_EX_INFORMATION,
-	0, 0,						//設定ウインドウのサイズ (FILTER_FLAG_WINDOW_SIZEが立っている時に有効)
-	kSoftName,					//フィルタの名前
-	kTracks,					//トラックバーの数 (0なら名前初期値等もNULLでよい)
-	track_name,					//トラックバーの名前郡へのポインタ
-	track_default,				//トラックバーの初期値郡へのポインタ
-	track_s, track_e,			//トラックバーの数値の下限上限 (NULLなら全て0～256)
-	kChecks,					//チェックボックスの数 (0なら名前初期値等もNULLでよい)
-	check_name,					//チェックボックスの名前郡へのポインタ
-	check_default,				//チェックボックスの初期値郡へのポインタ
-	func_proc,					//フィルタ処理関数へのポインタ (NULLなら呼ばれません)
-	func_init,					//開始時に呼ばれる関数へのポインタ (NULLなら呼ばれません)
-	NULL,						//終了時に呼ばれる関数へのポインタ (NULLなら呼ばれません)
-	NULL,						//設定が変更されたときに呼ばれる関数へのポインタ (NULLなら呼ばれません)
-	NULL,						//設定ウィンドウにウィンドウメッセージが来た時に呼ばれる関数へのポインタ (NULLなら呼ばれません)
-	NULL, NULL,					//システムで使いますので使用しないでください
-	NULL,						//拡張データ領域へのポインタ (FILTER_FLAG_EX_DATAが立っている時に有効)
-	NULL,						//拡張データサイズ (FILTER_FLAG_EX_DATAが立っている時に有効)
-	"waifu2x-cpu version 1.2 by YSR",
-	//フィルタ情報へのポインタ (FILTER_FLAG_EX_INFORMATIONが立っている時に有効)
-	NULL,						//セーブが開始される直前に呼ばれる関数へのポインタ (NULLなら呼ばれません)
-	NULL,						//セーブが終了した直前に呼ばれる関数へのポインタ (NULLなら呼ばれません)
-};
-
-EXTERN_C FILTER_DLL __declspec(dllexport) * __stdcall GetFilterTable(void){ return &filter; }
 
 /* using宣言 */
 using std::stod;
 using std::stoi;
 using std::string;
-using std::vector;
+
+/* Typedef宣言 */
+typedef uint32_t Int;
 
 /* 定数宣言 */
-enum kTrackBar { kTrackThread, kTrackNoise, kTrackScale, kTrackBlock };
+// UIにおける設定
+//トラックバー(数・名前・初期値・下限値・上限値を設定する)
+const int kTracks = 5;
+TCHAR *track_name[] = {"thread", "noise", "scale", "block_x", "block_y"};
+int   track_default[] = {1, 0, 0, 32, 32};
+int   track_s[] = {1, 0, 0, 32, 32};
+int   track_e[] = {32, 2, 1, 512, 512};
+enum kTrackBar { kTrackThread, kTrackNoise, kTrackScale, kTrackBlockX, kTrackBlockY };
 enum kModelKind { kModelDenoise1, kModelDenoise2, kModelScale2x, kModels };
-const int kMaxInput = 128;
-const int kMaxOutput = 128;
-const int kWidthSize = 3;
-const int kHeightSize = 3;
-const int kFilterSize = kWidthSize * kHeightSize;
-const int x_simd_step = sizeof(__m256) / sizeof(float);
+//チェックボックス(数・名前・初期値を設定する)
+const int kChecks = 1;
+TCHAR *check_name[] = {"use blocking"};
+int	  check_default[] = {0};
+// ソフトウェアにおける設定
+const auto kSteps = 7;		//ステップ数
+const auto kMaxInput = 128;	//入力平面の最大数
+const auto kMaxOutput = 128;	//出力平面の最大数
+const auto kWidthSize = 3;		//畳み込みする重みの横サイズ
+const auto kHeightSize = 3;		//畳み込みする重みの縦サイズ
+const auto kFilterSize = kWidthSize * kHeightSize;		//畳み込みする重みの全体サイズ
+const auto SIMD = sizeof(PackedFloat) / sizeof(float);	//SIMDにおける処理幅
+const PackedFloat kZeroSIMD = PackedSetZero();			//比較用の値
+const PackedFloat kConstSIMD = PackedSet1(0.1);			//負数だけ0.1を掛けるための値
 
-/* クラス定義 */
+/* クラス・構造体定義 */
+// フィルタDLL用構造体
+FILTER_DLL filter = {
+	FILTER_FLAG_EX_INFORMATION, 0, 0, kSoftName,
+	kTracks, track_name, track_default, track_s, track_e,
+	kChecks, check_name, check_default,
+	func_proc, func_init, NULL, NULL, NULL,
+	NULL, NULL,
+	NULL, NULL,
+	"waifu2x-cpu version 1.3 by YSR",
+	NULL, NULL,
+};
 // 1ステップにおけるデータ
-struct Step{
-	int output_plane_size;
-	int input_plane_size;
-	__m256 weight1[kMaxOutput][kMaxInput][kFilterSize];
-	__m256 weight2[kMaxOutput][kMaxInput][2];
-	vector<float> bias;
+struct Step {
+	Int output_plane_size;
+	Int input_plane_size;
+	PackedFloat weight_simd[kMaxOutput][kMaxInput][kFilterSize];
+	PackedFloat bias[kMaxOutput];
 };
 // 1モデルにおけるデータ
-struct Model{
-	vector<Step> steps;
+struct Model {
+	Step step[kSteps];
 	// 初期化関数
-	void Init(const string filename){
+	void Init(const string filename) {
 		// ファイルが開けないとアウト
 		std::ifstream fin(filename, std::ios_base::in | std::ios_base::binary);
 		if(fin.fail()) throw filename;
-		int steps_size;
-		//fin >> steps_size;
-		fin.read(reinterpret_cast<char*>(&steps_size), sizeof(int));
-		steps.resize(steps_size);
-		// inputおよびoutput
-		for(auto s = 0; s < steps_size; ++s){
-			fin.read(reinterpret_cast<char*>(&steps[s].input_plane_size), sizeof(int));
-			fin.read(reinterpret_cast<char*>(&steps[s].output_plane_size), sizeof(int));
-		}
-		// weight
-		for(auto s = 0; s < steps_size; ++s){
-			for(auto o = 0; o < steps[s].output_plane_size; ++o){
-				for(auto i = 0; i < steps[s].input_plane_size; ++i){
-					float weight[kFilterSize];
-					for(auto k = 0; k < kFilterSize; ++k){
-						fin.read(reinterpret_cast<char*>(&weight[k]), sizeof(float));
-						steps[s].weight1[o][i][k] = _mm256_set1_ps(weight[k]);
+		// 読み込みループ
+		for(auto s = 0; s < kSteps; ++s) {
+			Step *now_step = &step[s];	//現在のStepを指すポインタ
+			// inputおよびoutput
+			fin.read(reinterpret_cast<char*>(&now_step->input_plane_size), sizeof(Int));
+			fin.read(reinterpret_cast<char*>(&now_step->output_plane_size), sizeof(Int));
+			// weight
+			for(auto o = 0; o < now_step->output_plane_size; ++o) {
+				for(auto i = 0; i < now_step->input_plane_size; ++i) {
+					PackedFloat *now_weight_simd = now_step->weight_simd[o][i];
+					for(auto k = 0; k < kFilterSize; ++k) {
+						float temp;
+						fin.read(reinterpret_cast<char*>(&temp), sizeof(float));
+						now_weight_simd[k] = PackedSet1(temp);
 					}
-					/* 添字の順番：
-					* WとHをWHと表す場合、元々は00 01 02 10 11 12 20 21 22と格納していた
-					* それをX優先で00 10 20 01 11 21 02 12 22とメモリ上に並べたいので、
-					* 0,1,2,3,4,5,6,7,8番目のデータを添字0,3,6,1,4,7,2,5,8番目に置くことに
-					*/
-					steps[s].weight2[o][i][0] = _mm256_set_ps(weight[0], weight[3], weight[6], weight[1], weight[4], weight[7], weight[2], weight[5]);
-					steps[s].weight2[o][i][1] = _mm256_set_ps(weight[8], 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 				}
 			}
-		}
-		// bias
-		for(auto s = 0; s < steps_size; ++s){
-			steps[s].bias.resize(steps[s].output_plane_size);
-			for(auto o = 0; o < steps[s].output_plane_size; ++o){
-				fin.read(reinterpret_cast<char*>(&steps[s].bias[o]), sizeof(float));
+			// bias
+			for(auto o = 0; o < now_step->output_plane_size; ++o) {
+				float temp;
+				fin.read(reinterpret_cast<char*>(&temp), sizeof(float));
+				now_step->bias[o] = PackedSet1(temp);
 			}
 		}
 	}
 };
 
 /* プロトタイプ宣言 */
-void SetFilter(FILTER_PROC_INFO*, const int, const int);
-void SetFilterWithBlocking(FILTER_PROC_INFO*, const int, const int, const int);
+// StretchNN(フィルタPROC用構造体へのポインタ)
+void StretchNN(FILTER_PROC_INFO*);
+// SetFilter(フィルタPROC用構造体へのポインタ, 処理する際に使うモデルデータの番号, スレッド数, 分割時のブロックサイズ<, 〃Y)
+void SetFilter(FILTER_PROC_INFO*, const int, const int, const int, const int);
 
 /* グローバル変数宣言 */
 /* こんなことはしたくなかったんや！
@@ -136,447 +118,331 @@ void SetFilterWithBlocking(FILTER_PROC_INFO*, const int, const int, const int);
 * 馬鹿げたことはしたくなかったんや！
 * 誰か私にもっと上手い対処法を教えてくれ……
 */
-vector<Model> g_models(kModels);
-auto start = std::chrono::system_clock::now();
+Model g_model_data[kModels];
+
+/* AviUtlから呼び出すための関数 */
+EXTERN_C FILTER_DLL __declspec(dllexport) * __stdcall GetFilterTable(void) {
+	return &filter;
+}
 
 /* 初期化関数 */
-BOOL func_init(FILTER *fp){
-	try{
-		g_models[kModelDenoise1].Init(".\\plugins\\models\\noise1_model3.dat");
-		g_models[kModelDenoise2].Init(".\\plugins\\models\\noise2_model3.dat");
-		g_models[kModelScale2x].Init(".\\plugins\\models\\scale2.0x_model3.dat");
-	}
-	catch(string err_msg_){
+BOOL func_init(FILTER *fp) {
+	try {
+		g_model_data[kModelDenoise1].Init(".\\plugins\\models\\noise1_model.dat");
+		g_model_data[kModelDenoise2].Init(".\\plugins\\models\\noise2_model.dat");
+		g_model_data[kModelScale2x].Init(".\\plugins\\models\\scale2.0x_model.dat");
+	} catch(string err_msg_) {
 		string err_msg = err_msg_ + "を読み込む際にエラーが発生しました。";
-		MessageBox(NULL, err_msg_.c_str(), "waifu2x-cpu", MB_OK);
+		MessageBox(NULL, err_msg_.c_str(), kSoftName, MB_OK);
 		return FALSE;
 	}
 	return TRUE;
 }
 
 /* 処理関数 */
-BOOL func_proc(FILTER *fp, FILTER_PROC_INFO *fpip){
-	/*
-	* fp->track[n]			トラックバーの数値
-	* fp->check[n]			チェックボックスの数値
-	* fpip->w 				実際の画像の横幅
-	* fpip->h 				実際の画像の縦幅
-	* fpip->max_w			画像領域の横幅
-	* fpip->max_h			画像領域の縦幅
-	* fpip->ycp_edit		画像領域へのポインタ
-	* fpip->ycp_temp		テンポラリ領域へのポインタ
-	* fpip->ycp_edit[n].y	画素(輝度    )データ (    0 ～ 4096)
-	* fpip->ycp_edit[n].cb	画素(色差(青))データ (-2048 ～ 2048)
-	* fpip->ycp_edit[n].cr	画素(色差(赤))データ (-2048 ～ 2048)
-	*
-	*   画素データは範囲外に出ていることがあります。
-	*   また範囲内に収めなくてもかまいません。
-	*
-	* 画像サイズを変えたいときは fpip->w や fpip->h を変えます。
-	*
-	* テンポラリ領域に処理した画像を格納したいときは
-	* fpip->ycp_edit と fpip->ycp_temp を入れ替えます。
-	*/
-	// 計算しない場合はデフォルトのタイトルに直す
-	if((fp->track[kTrackNoise] == 0) && (fp->track[kTrackScale] == 0)){
-		if(!fp->exfunc->is_saving(fpip->editp)) SetWindowText(fp->hwnd, _T(kSoftName));
-		return TRUE;
-	}
-	if(!fp->exfunc->is_saving(fpip->editp)){
-		SetWindowText(fp->hwnd, _T("waifu2x-cpu(処理中...)"));
-		start = std::chrono::system_clock::now();
-	}
-
-	// 設定に応じてモデルデータを選択し、処理を行う
-	if(fp->track[kTrackNoise] > 0){
-		// ノイズ除去する場合
-		if(fp->check[0] == 0){
-			SetFilter(fpip, fp->track[kTrackNoise] - 1, fp->track[kTrackThread]);
-		} else{
-			SetFilterWithBlocking(fpip, fp->track[kTrackNoise] - 1, fp->track[kTrackThread], fp->track[kTrackBlock]);
-		}
-	}
-	if(fp->track[kTrackScale] > 0){
-		// 2x倍にスケールする場合
-		//まず最近傍法で拡大する
-		for(auto y = 0; y < fpip->h; y++) {
-			for(auto k = 0; k < 2; ++k){
-				auto ycp1 = fpip->ycp_edit + y           * fpip->max_w;
-				auto ycp2 = fpip->ycp_temp + (y * 2 + k) * fpip->max_w;
-				for(auto x = 0; x < fpip->w; x++) {
-					ycp2->y = ycp1->y;
-					ycp2->cb = ycp1->cb;
-					ycp2->cr = ycp1->cr;
-					ycp2[1].y = ycp1->y;
-					ycp2[1].cb = ycp1->cb;
-					ycp2[1].cr = ycp1->cr;
-					ycp2 += 2;
-					ycp1++;
-				}
+BOOL func_proc(FILTER *fp, FILTER_PROC_INFO *fpip) {
+	try {
+		// 計算するする場合としない場合とで、タイトルバーの表示を変更する
+		if(!fp->exfunc->is_saving(fpip->editp)) {
+			if((fp->track[kTrackNoise] == 0) && (fp->track[kTrackScale] == 0)) {
+				// 計算しない場合
+				SetWindowText(fp->hwnd, _T(kSoftName));
+				return TRUE;
+			} else {
+				// 計算する場合
+				SetWindowText(fp->hwnd, _T("waifu2x-cpu(処理中...)"));
 			}
 		}
-		fpip->w *= 2;
-		fpip->h *= 2;
-		auto ycp = fpip->ycp_edit;
-		fpip->ycp_edit = fpip->ycp_temp;
-		fpip->ycp_temp = ycp;
-		//そしてフィルタ処理する
-		if(fp->check[0] == 0){
-			SetFilter(fpip, kModelScale2x, fp->track[kTrackThread]);
-		} else{
-			SetFilterWithBlocking(fpip, kModelScale2x, fp->track[kTrackThread], fp->track[kTrackBlock]);
-		}
-	}
 
-	// 演算時間をタイトルバーに表示する
-	if(!fp->exfunc->is_saving(fpip->editp)){
-		auto end = std::chrono::system_clock::now();
-		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-		std::stringstream title_bar;
-		title_bar << "waifu2x-cpu(" << ms << "ms)";
-		SetWindowText(fp->hwnd, _T(title_bar.str().c_str()));
+		// 計算する場合、設定に応じてモデルデータを選択し、フィルタ処理を行う
+		auto start = std::chrono::system_clock::now();
+		//ノイズ除去する場合は、後に拡大する場合でも先に処理する
+		if(fp->track[kTrackNoise] > 0) {
+			SetFilter(fpip, fp->track[kTrackNoise] - 1, fp->track[kTrackThread], fp->check[0] * fp->track[kTrackBlockX], fp->check[0] * fp->track[kTrackBlockY]);
+		}
+		//拡大する場合は、まず最近傍法で拡大してからフィルタ処理を行う
+		if(fp->track[kTrackScale] > 0) {
+			StretchNN(fpip);
+			SetFilter(fpip, kModelScale2x, fp->track[kTrackThread], fp->check[0] * fp->track[kTrackBlockX], fp->check[0] * fp->track[kTrackBlockY]);
+		}
+
+		// 演算時間をタイトルバーに表示する
+		if(!fp->exfunc->is_saving(fpip->editp)) {
+			auto end = std::chrono::system_clock::now();
+			auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+			std::stringstream title_bar;
+			title_bar << "waifu2x-cpu(" << ms << "ms)";
+			SetWindowText(fp->hwnd, _T(title_bar.str().c_str()));
+		}
+	}catch(...) {
+		if(!fp->exfunc->is_saving(fpip->editp)) {
+			SetWindowText(fp->hwnd, _T(kSoftName));
+			MessageBox(NULL, "メモリが確保できませんでした。", kSoftName, MB_OK);
+		}
+		return FALSE;
 	}
 	return TRUE;
 }
 
-/* フィルタ処理(ブロッキングなし) */
-void SetFilter(FILTER_PROC_INFO *fpip, const int mode_, const int thread_){
-	int steps_size = g_models[mode_].steps.size();
-	//x_simd_stepを付け足したのは、右端が何故かぼやけるのを修正するため。
-	//冷静に考えなくてもバッドノウハウだけど仕方ないね……
-	int x_size = fpip->w + steps_size * 2 + x_simd_step;
-	int y_size = fpip->h + steps_size * 2;
-	// Y成分を[0,1]に正規化する
-	vector< vector < vector<float> > >input_picture_y(kMaxInput, vector < vector<float> >(y_size, vector<float>(x_size)));
-	for(auto y = 0; y < fpip->h; y++) {
-		auto ycp = fpip->ycp_edit + y * fpip->max_w;
-		for(auto x = 0; x < fpip->w; x++) {
-			float normalized_y = 1.0f * ycp->y / 4096.0f;
-			if(normalized_y < 0.0f) normalized_y = 0.0f;
-			if(normalized_y > 1.0f) normalized_y = 1.0f;
-			input_picture_y[0][y + steps_size][x + steps_size] = normalized_y;
-			ycp++;
-		}
-	}
-	// 辺の部分を拡張する
-	for(auto y = 0; y < steps_size; ++y){	//左上
-		for(auto x = 0; x < steps_size; ++x){
-			input_picture_y[0][y][x] = input_picture_y[0][steps_size][steps_size];
-		}
-	}
-	for(auto y = 0; y < steps_size; ++y){
-		for(auto x = steps_size; x < fpip->w + steps_size; ++x){	//上
-			input_picture_y[0][y][x] = input_picture_y[0][steps_size][x];
-		}
-	}
-	for(auto y = 0; y < steps_size; ++y){	//右上
-		for(auto x = fpip->w + steps_size; x < x_size; ++x){
-			input_picture_y[0][y][x] = input_picture_y[0][steps_size][fpip->w + steps_size - 1];
-		}
-	}
-	for(auto y = steps_size; y < fpip->h + steps_size; ++y){	//右
-		for(auto x = fpip->w + steps_size; x < x_size; ++x){
-			input_picture_y[0][y][x] = input_picture_y[0][y][fpip->w + steps_size - 1];
-		}
-	}
-	for(auto y = fpip->h + steps_size; y < y_size; ++y){	//右下
-		for(auto x = fpip->w + steps_size; x < x_size; ++x){
-			input_picture_y[0][y][x] = input_picture_y[0][fpip->h + steps_size - 1][fpip->w + steps_size - 1];
-		}
-	}
-	for(auto y = fpip->h + steps_size; y < y_size; ++y){	//下
-		for(auto x = steps_size; x < fpip->w + steps_size; ++x){
-			input_picture_y[0][y][x] = input_picture_y[0][fpip->h + steps_size - 1][x];
-		}
-	}
-	for(auto y = fpip->h + steps_size; y < y_size; ++y) {	//左下
-		for(auto x = 0; x < steps_size; ++x){
-			input_picture_y[0][y][x] = input_picture_y[0][fpip->h + steps_size - 1][steps_size];
-		}
-	}
-	for(auto y = steps_size; y < fpip->h + steps_size; ++y){//左
-		for(auto x = 0; x < steps_size; ++x){
-			input_picture_y[0][y][x] = input_picture_y[0][y][steps_size];
-		}
-	}
-	// メインループ
-	vector< vector < vector<float> > >output_picture_y(kMaxOutput, vector < vector<float> >(y_size, vector<float>(x_size)));
-	x_size -= 2;
-	y_size -= 2;
-	for(auto s = 0; s < steps_size; ++s){
-		Step* step_data = &g_models[mode_].steps[s];
-		auto input_plane_size = step_data->input_plane_size;
-		auto output_plane_size = step_data->output_plane_size;
-		for(auto o = 0; o < output_plane_size; ++o){
-			for(auto y = 0; y < y_size; ++y){
-				for(auto x = 0; x < x_size; ++x){
-					output_picture_y[o][y][x] = 0.0f;
-				}
+/* 最近傍法による拡大を行う */
+void StretchNN(FILTER_PROC_INFO *fpip) {
+	// 拡大に使用する処理サイズを決定する
+	// (拡大後に画像領域からはみ出ないようにする)
+	auto scale_size_x = fpip->w;
+	if(scale_size_x * 2 > fpip->max_w) scale_size_x = fpip->max_w / 2;
+	auto scale_size_y = fpip->h;
+	if(scale_size_y * 2 > fpip->max_h) scale_size_y = fpip->max_h / 2;
+	// 最近傍法で、fpip->ycp_editからfpip->ycp_tempに向かって拡大する
+	// (単に2倍にしているだけなので楽に記述できる)
+	for(auto y = 0; y < scale_size_y; y++) {
+		auto ycp_from = fpip->ycp_edit + y     * fpip->max_w;
+		auto ycp_to = fpip->ycp_temp + y * 2 * fpip->max_w;
+		for(auto x = 0; x < scale_size_x; x++) {
+			for(auto k = 0; k < 2; ++k) {
+				ycp_to->y = ycp_from->y;
+				ycp_to->cb = ycp_from->cb;
+				ycp_to->cr = ycp_from->cr;
+				ycp_to[fpip->max_w].y = ycp_from->y;
+				ycp_to[fpip->max_w].cb = ycp_from->cb;
+				ycp_to[fpip->max_w].cr = ycp_from->cr;
+				++ycp_to;
 			}
-		}
-		// 畳み込み演算
-		int x_size_ = x_size / x_simd_step * x_simd_step;
-#pragma omp parallel for num_threads(thread_)
-		for(auto o = 0; o < output_plane_size; ++o){
-			// 3x3のフィルタ処理
-			for(auto i = 0; i < input_plane_size; ++i){
-				// 割り切れる部分は纏めて処理してしまう
-				for(auto y = 0; y < y_size; ++y){
-					for(auto x = 0; x < x_size_; x += x_simd_step){
-						__m256 input_simd[kFilterSize];
-						__m256 *w1 = step_data->weight1[o][i];
-						for(auto h = 0; h < kHeightSize; ++h){
-							for(auto w = 0; w < kWidthSize; ++w){
-								input_simd[h * kWidthSize + w] = _mm256_loadu_ps(&input_picture_y[i][y + h][x + w]);
-							}
-						}
-						__m256 sum_simd = _mm256_setzero_ps();
-						for(auto k = 0; k < kFilterSize; ++k){
-							sum_simd = _mm256_fmadd_ps(w1[k], input_simd[k], sum_simd);
-						}
-						__declspec(align(32)) float sum[x_simd_step];
-						_mm256_store_ps(sum, sum_simd);
-						for(auto k = 0; k < x_simd_step; ++k){
-							output_picture_y[o][y][x + k] += sum[k];
-						}
-					}
-				}
-				// 残りの部分はそこそこのSIMD化で乗り切る
-				__m256 *w2 = step_data->weight2[o][i];
-				for(auto y = 0; y < y_size; ++y){
-					for(auto x = x_size_; x < x_size; ++x){
-						__m256 input_simd0 = _mm256_set_ps(input_picture_y[i][y + 0][x + 0], input_picture_y[i][y + 0][x + 1], input_picture_y[i][y + 0][x + 2], input_picture_y[i][y + 1][x + 0], input_picture_y[i][y + 1][x + 1], input_picture_y[i][y + 1][x + 2], input_picture_y[i][y + 2][x + 0], input_picture_y[i][y + 2][x + 1]);
-						__m256 input_simd1 = _mm256_set_ps(input_picture_y[i][y + 2][x + 2], 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-						__m256 sum_simd = _mm256_mul_ps(w2[0], input_simd0);
-						sum_simd = _mm256_fmadd_ps(w2[1], input_simd1, sum_simd);
-						// ここから
-						sum_simd = _mm256_hadd_ps(sum_simd, sum_simd);
-						sum_simd = _mm256_hadd_ps(sum_simd, sum_simd);
-						__m256 rsum = _mm256_permute2f128_ps(sum_simd, sum_simd, 0 << 4 | 1);
-						sum_simd = _mm256_unpacklo_ps(sum_simd, rsum);
-						sum_simd = _mm256_hadd_ps(sum_simd, sum_simd);
-						// ここまでが水平演算
-						__declspec(align(32)) float sum[8];
-						_mm256_store_ps(sum, sum_simd);
-						output_picture_y[o][y][x] += sum[0];
-					}
-				}
-			}
-			// バイアスを掛ける
-			for(auto y = 0; y < y_size; ++y){
-				for(auto x = 0; x < x_size; ++x){
-					output_picture_y[o][y][x] += step_data->bias[o];
-				}
-			}
-		}
-		// 次ステップのために調整する
-		for(auto o = 0; o < output_plane_size; ++o){
-			for(auto y = 0; y < y_size; ++y){
-				for(auto x = 0; x < x_size; ++x){
-					input_picture_y[o][y][x] = output_picture_y[o][y][x];
-					if(input_picture_y[o][y][x] < 0.0f) input_picture_y[o][y][x] *= 0.1f;
-				}
-			}
-		}
-		x_size -= 2;
-		y_size -= 2;
-	}
-
-	// 結果を戻す
-	for(auto y = 0; y < fpip->h; y++) {
-		auto ycp = fpip->ycp_edit + y * fpip->max_w;
-		for(auto x = 0; x < fpip->w; x++) {
-			ycp->y = static_cast<short>(round(input_picture_y[0][y][x] * 4096));
-			ycp++;
+			++ycp_from;
 		}
 	}
+	// 現在の画面サイズを変更する
+	fpip->w = scale_size_x * 2;
+	fpip->h = scale_size_y * 2;
+	// 最後にポインタを入れ替える
+	auto ycp = fpip->ycp_edit;
+	fpip->ycp_edit = fpip->ycp_temp;
+	fpip->ycp_temp = ycp;
 }
 
-/* フィルタ処理(ブロッキングあり) */
-void SetFilterWithBlocking(FILTER_PROC_INFO *fpip, const int mode_, const int thread_, const int block_){
-	int steps_size = g_models[mode_].steps.size();
-	// 境界線処理を正常にするためのマージンサイズを決定する
-	int margin_size = steps_size + 1;
-	while((block_ + margin_size) % x_simd_step != 0){
-		++margin_size;
-	}
-	// パディング処理をブロッキング向けにするため、予めパディングしておいたのを用意する
-	// (省メモリに微妙に反するが、境界線上がおかしくなるから仕方ないね……)
-	int x_size_big = fpip->w + steps_size * 2 + margin_size;
-	int y_size_big = fpip->h + steps_size * 2 + margin_size;
-	//Y成分を[0,1]に正規化する
-	vector < vector<float> >input_picture_y_big(y_size_big, vector<float>(x_size_big));
+/* フィルタ処理を行う */
+/* mode_         …… kModelKindに対応している。0～2がデノイズレベル1・デノイズレベル2・拡大
+* thread_       …… 処理するスレッド数
+* block_size_x_ …… 処理する際のブロックサイズX。0だと横幅と同じになる
+* block_size_y_ …… 処理する際のブロックサイズY。0だと縦幅と同じになる
+*/
+void SetFilter(FILTER_PROC_INFO *fpip, const int mode_, const int thread_, const int block_size_x_, const int block_size_y_) {
+	/* ブロック処理する際のブロックサイズを決定する
+	* 0だと横・縦幅と同じになるので、分割しなくても同じ処理を踏ませることになる
+	*/
+	auto block_size_x = block_size_x_;
+	if(block_size_x == 0) block_size_x = fpip->w;
+	auto block_size_y = block_size_y_;
+	if(block_size_y == 0) block_size_y = fpip->h;
+
+	/* 縦横の、下・右部分のパディングサイズを決定する
+	* ・ステップ数をXとした際、パディングは画像の上下左右にX以上無ければならない
+	* ・ブロッッキングする場合、画像をブロックに分割した後、パディング込みのデータを処理する必要がある
+	* ・SIMD処理の観点から、パディング後の横幅は処理幅(SSE系だと128/32＝4、AVX・軽だと8)で割り切れると美味しい
+	*/
+	// 右部分のパディングサイズ(調整が必要)
+	// 例えば処理幅4で3ドット余れば1ドット付け足し、処理幅8で5ドット余れば3ドット付け足す
+	auto padding_x = kSteps;
+	auto rightest_block_size = fpip->w % block_size_x;
+	if(rightest_block_size == 0) rightest_block_size = block_size_x;
+	auto surplus = (kSteps + rightest_block_size + kSteps) % SIMD;
+	if(surplus != 0) padding_x += (SIMD - surplus);
+	//下部分のパディングサイズ(そのままでOK)
+	auto padding_y = kSteps;
+
+	/* 決定したパディングサイズに従いパディングする */
+	// Y成分を[0,1]に正規化する
+	auto padded_picture_x = kSteps + fpip->w + padding_x;
+	auto padded_picture_y = kSteps + fpip->h + padding_y;
+	float *padded_picture = (float*)_mm_malloc(sizeof(float) * padded_picture_y * padded_picture_x, alignment_size);
+	if(padded_picture == NULL) throw 0;
 	for(auto y = 0; y < fpip->h; y++) {
 		auto ycp = fpip->ycp_edit + y * fpip->max_w;
 		for(auto x = 0; x < fpip->w; x++) {
-			float normalized_y = 1.0f * ycp->y / 4096.0f;
+			float normalized_y = 1.0f * ycp->y / 4096;
 			if(normalized_y < 0.0f) normalized_y = 0.0f;
 			if(normalized_y > 1.0f) normalized_y = 1.0f;
-			input_picture_y_big[y + steps_size][x + steps_size] = normalized_y;
+			padded_picture[(y + kSteps) * padded_picture_x + x + kSteps] = normalized_y;
 			ycp++;
 		}
 	}
-	//辺の部分を拡張する
-	for(auto y = 0; y < steps_size; ++y){	//左上
-		for(auto x = 0; x < steps_size; ++x){
-			input_picture_y_big[y][x] = input_picture_y_big[steps_size][steps_size];
+	// 辺の部分を拡張する(途中、テンポラリな変数を挟むことで高速化を図った)
+	//左上
+	auto temp = padded_picture[kSteps * padded_picture_x + kSteps];
+	for(auto y = 0; y < kSteps; ++y) {
+		for(auto x = 0; x < kSteps; ++x) {
+			padded_picture[y * padded_picture_x + x] = temp;
 		}
 	}
-	for(auto y = 0; y < steps_size; ++y){
-		for(auto x = steps_size; x < fpip->w + steps_size; ++x){	//上
-			input_picture_y_big[y][x] = input_picture_y_big[steps_size][x];
+	//右上
+	temp = padded_picture[kSteps * padded_picture_x + fpip->w + kSteps - 1];
+	for(auto y = 0; y < kSteps; ++y) {
+		for(auto x = fpip->w + kSteps; x < padded_picture_x; ++x) {
+			padded_picture[y * padded_picture_x + x] = temp;
 		}
 	}
-	for(auto y = 0; y < steps_size; ++y){	//右上
-		for(auto x = fpip->w + steps_size; x < x_size_big; ++x){
-			input_picture_y_big[y][x] = input_picture_y_big[steps_size][fpip->w + steps_size - 1];
+	//右下
+	temp = padded_picture[(fpip->h + kSteps - 1) * padded_picture_x + fpip->w + kSteps - 1];
+	for(auto y = fpip->h + kSteps; y < padded_picture_y; ++y) {
+		for(auto x = fpip->w + kSteps; x < padded_picture_x; ++x) {
+			padded_picture[y * padded_picture_x + x] = temp;
 		}
 	}
-	for(auto y = steps_size; y < fpip->h + steps_size; ++y){	//右
-		for(auto x = fpip->w + steps_size; x < x_size_big; ++x){
-			input_picture_y_big[y][x] = input_picture_y_big[y][fpip->w + steps_size - 1];
+	//左下
+	temp = padded_picture[(fpip->h + kSteps - 1) * padded_picture_x + kSteps];
+	for(auto y = fpip->h + kSteps; y < padded_picture_y; ++y) {
+		for(auto x = 0; x < kSteps; ++x) {
+			padded_picture[y * padded_picture_x + x] = temp;
 		}
 	}
-	for(auto y = fpip->h + steps_size; y < y_size_big; ++y){	//右下
-		for(auto x = fpip->w + steps_size; x < x_size_big; ++x){
-			input_picture_y_big[y][x] = input_picture_y_big[fpip->h + steps_size - 1][fpip->w + steps_size - 1];
+	//上
+	auto *temp_p = &padded_picture[kSteps * padded_picture_x];
+	for(auto y = 0; y < kSteps; ++y) {
+		for(auto x = kSteps; x < fpip->w + kSteps; ++x) {
+			padded_picture[y * padded_picture_x + x] = temp_p[x];
 		}
 	}
-	for(auto y = fpip->h + steps_size; y < y_size_big; ++y){	//下
-		for(auto x = steps_size; x < fpip->w + steps_size; ++x){
-			input_picture_y_big[y][x] = input_picture_y_big[fpip->h + steps_size - 1][x];
+	//右
+	for(auto y = kSteps; y < fpip->h + kSteps; ++y) {
+		temp = padded_picture[y * padded_picture_x + fpip->w + kSteps - 1];
+		for(auto x = fpip->w + kSteps; x < padded_picture_x; ++x) {
+			padded_picture[y * padded_picture_x + x] = temp;
 		}
 	}
-	for(auto y = fpip->h + steps_size; y < y_size_big; ++y) {	//左下
-		for(auto x = 0; x < steps_size; ++x){
-			input_picture_y_big[y][x] = input_picture_y_big[fpip->h + steps_size - 1][steps_size];
+	//下
+	temp_p = &padded_picture[(fpip->h + kSteps - 1) * padded_picture_x];
+	for(auto y = fpip->h + kSteps; y < padded_picture_y; ++y) {
+		for(auto x = kSteps; x < fpip->w + kSteps; ++x) {
+			padded_picture[y * padded_picture_x + x] = temp_p[x];
 		}
 	}
-	for(auto y = steps_size; y < fpip->h + steps_size; ++y){//左
-		for(auto x = 0; x < steps_size; ++x){
-			input_picture_y_big[y][x] = input_picture_y_big[y][steps_size];
+	//左
+	for(auto y = kSteps; y < fpip->h + kSteps; ++y) {
+		temp = padded_picture[y * padded_picture_x + kSteps];
+		for(auto x = 0; x < kSteps; ++x) {
+			padded_picture[y * padded_picture_x + x] = temp;
 		}
 	}
-	// ブロックに分割して処理する
-	int block_num_x = fpip->w / block_;
-	int block_num_y = fpip->h / block_;
-	if(fpip->w % block_ != 0) ++block_num_x;
-	if(fpip->h % block_ != 0) ++block_num_y;
-	int y_size_base = block_, y_size = y_size_base + steps_size * 2;
-	for(auto block_pos_y = 0; block_pos_y < block_num_y; ++block_pos_y){
-		if(block_pos_y == block_num_y - 1){
-			y_size_base = fpip->h - block_pos_y * block_;
-			y_size = y_size_base + steps_size * 2;
+
+	/* パディング結果をブロックに分割して処理する */
+	// 分割数を計算
+	auto block_num_x = fpip->w / block_size_x;
+	if(fpip->w % block_size_x != 0) ++block_num_x;
+	auto block_num_y = fpip->h / block_size_y;
+	if(fpip->h % block_size_y != 0) ++block_num_y;
+	// 縦方向における入力サイズ(input_size_y)と出力サイズ(output_size_y)を決定する
+	auto input_size_y = block_size_y + kSteps * 2;
+	auto output_size_y = block_size_y;
+	// ループを回す
+	for(auto block_pos_y = 0; block_pos_y < block_num_y; ++block_pos_y) {
+		// 一番下のブロック行だけ、入力サイズを調節する
+		if(block_pos_y == block_num_y - 1) {
+			output_size_y = fpip->h - block_pos_y * block_size_y;
+			input_size_y = output_size_y + kSteps * 2;
 		}
-		int x_size_base = block_, x_size = x_size_base + steps_size * 2;
-		for(auto block_pos_x = 0; block_pos_x < block_num_x; ++block_pos_x){
-			if(block_pos_x == block_num_x - 1){
-				x_size_base = fpip->w - block_pos_x * block_;
-				x_size = x_size_base + steps_size * 2;
+		// 横方向における入力サイズ(input_size_x)と出力サイズ(output_size_x)を決定する
+		auto input_size_x = block_size_x + kSteps * 2;
+		if (input_size_x % SIMD != 0) input_size_x += SIMD - (input_size_x % SIMD);
+		auto input_size_x_SIMD = input_size_x / SIMD;
+		auto output_size_x = block_size_x;
+		for(auto block_pos_x = 0; block_pos_x < block_num_x; ++block_pos_x) {
+			// 一番右のブロック列だけ、入力サイズを調節する
+			if(block_pos_y == block_num_y - 1) {
+				output_size_x = fpip->w - block_pos_x * block_size_x;
+				input_size_x = output_size_x + kSteps * 2;
+				if(input_size_x % SIMD != 0) input_size_x += SIMD - (input_size_x % SIMD);
+				input_size_x_SIMD = input_size_x / SIMD;
 			}
 			/* 入力部分 */
-			x_size += margin_size; y_size += margin_size;
-			vector< vector < vector<float> > >input_picture_y(kMaxInput, vector < vector<float> >(y_size, vector<float>(x_size)));
-			for(auto y = 0; y < y_size; y++) {
-				for(auto x = 0; x < x_size; x++) {
-					input_picture_y[0][y][x] = input_picture_y_big[y + block_pos_y * block_][x + block_pos_x * block_];
+			float *input_picture_y = (float*)_mm_malloc(sizeof(float) * kMaxInput * input_size_y * input_size_x, alignment_size);
+			if (input_picture_y == NULL) throw 0;
+			for(auto y = 0; y < input_size_y; y++) {
+				for(auto x = 0; x < input_size_x; ++x) {
+					input_picture_y[y * input_size_x + x] = padded_picture[(block_pos_y * block_size_y + y) * padded_picture_x + (block_pos_x * block_size_x + x)];
 				}
 			}
-			x_size_base += margin_size; y_size_base += margin_size;
 			/* 演算部分 */
-			// メインループ
-			vector< vector < vector<float> > >output_picture_y(kMaxOutput, vector < vector<float> >(y_size, vector<float>(x_size)));
-			auto x_size_ = x_size - 2;
-			auto y_size_ = y_size - 2;
-			for(auto s = 0; s < steps_size; ++s){
-				Step* step_data = &g_models[mode_].steps[s];
-				auto input_plane_size = step_data->input_plane_size;
-				auto output_plane_size = step_data->output_plane_size;
-				for(auto o = 0; o < output_plane_size; ++o){
-					for(auto y = 0; y < y_size_; ++y){
-						for(auto x = 0; x < x_size_; ++x){
-							output_picture_y[o][y][x] = 0.0f;
+			// 縦サイズはステップ毎に2づつ減っていくが横サイズは減らない。
+			// これは、横サイズを折角SIMD向けに処理幅で割り切れるようにしたのに潰されたくないため。
+			PackedFloat *output_picture_y = (PackedFloat*)_mm_malloc(sizeof(PackedFloat) * kMaxOutput * input_size_y * input_size_x_SIMD, alignment_size);
+			if (output_picture_y == NULL) throw 0;
+			auto input_size_y_ = input_size_y - 2;
+			for(auto s = 0; s < kSteps; ++s) {
+				Step *step = &g_model_data[mode_].step[s];
+				auto input_plane_size = step->input_plane_size;
+				auto output_plane_size = step->output_plane_size;
+				// 出力平面を初期化する
+				for(auto o = 0; o < output_plane_size; ++o) {
+					for(auto y = 0; y < input_size_y_; ++y) {
+						for(auto x = 0; x < input_size_x_SIMD; ++x) {
+							output_picture_y[(o * input_size_y + y) * input_size_x_SIMD + x] = PackedSetZero();
 						}
 					}
 				}
-				// 畳み込み演算
-				int x_size__ = x_size_ / x_simd_step * x_simd_step;
-#pragma omp parallel for num_threads(thread_)
-				for(auto o = 0; o < output_plane_size; ++o){
-					// 3x3のフィルタ処理
-					for(auto i = 0; i < input_plane_size; ++i){
-						// 割り切れる部分は纏めて処理してしまう
-						for(auto y = 0; y < y_size_; ++y){
-							for(auto x = 0; x < x_size__; x += x_simd_step){
-								__m256 input_simd[kFilterSize];
-								__m256 *w1 = step_data->weight1[o][i];
-								for(auto h = 0; h < kHeightSize; ++h){
-									for(auto w = 0; w < kWidthSize; ++w){
-										input_simd[h * kWidthSize + w] = _mm256_loadu_ps(&input_picture_y[i][y + h][x + w]);
+				// 出力平面を生成する
+				#pragma omp parallel for num_threads(thread_)
+				for(auto o = 0; o < output_plane_size; ++o) {
+					// 畳み込み演算する
+					for(auto i = 0; i < input_plane_size; ++i) {
+						for(auto y = 0; y < input_size_y_; ++y) {
+							for(auto x = 0, x_SIMD = 0; x < input_size_x; x += SIMD, ++x_SIMD) {
+								// 読み込み
+								PackedFloat input_simd[kFilterSize];
+								PackedFloat *weight = step->weight_simd[o][i];
+								for(auto h = 0; h < kHeightSize; ++h) {
+									for(auto w = 0; w < kWidthSize; ++w) {
+										input_simd[h * kWidthSize + w] = PackedLoad(&input_picture_y[(i * input_size_y + (y + h)) * input_size_x + (x + w)]);
 									}
 								}
-								__m256 sum_simd = _mm256_setzero_ps();
-								for(auto k = 0; k < kFilterSize; ++k){
-									sum_simd = _mm256_fmadd_ps(w1[k], input_simd[k], sum_simd);
+								// 演算・書き込み
+								PackedFloat *temp_simd = &output_picture_y[(o * input_size_y + y) * input_size_x_SIMD + x_SIMD];
+								for(auto k = 0; k < kFilterSize; ++k) {
+									*temp_simd = PackedFMA(weight[k], input_simd[k], *temp_simd);
 								}
-								__declspec(align(32)) float sum[x_simd_step];
-								_mm256_store_ps(sum, sum_simd);
-								for(auto k = 0; k < x_simd_step; ++k){
-									output_picture_y[o][y][x + k] += sum[k];
-								}
-							}
-						}
-						// 残りの部分はそこそこのSIMD化で乗り切る
-						__m256 *w2 = step_data->weight2[o][i];
-						for(auto y = 0; y < y_size_; ++y){
-							for(auto x = x_size__; x < x_size; ++x){
-								__m256 input_simd0 = _mm256_set_ps(input_picture_y[i][y + 0][x + 0], input_picture_y[i][y + 0][x + 1], input_picture_y[i][y + 0][x + 2], input_picture_y[i][y + 1][x + 0], input_picture_y[i][y + 1][x + 1], input_picture_y[i][y + 1][x + 2], input_picture_y[i][y + 2][x + 0], input_picture_y[i][y + 2][x + 1]);
-								__m256 input_simd1 = _mm256_set_ps(input_picture_y[i][y + 2][x + 2], 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-								__m256 sum_simd = _mm256_mul_ps(w2[0], input_simd0);
-								sum_simd = _mm256_fmadd_ps(w2[1], input_simd1, sum_simd);
-								// ここから
-								sum_simd = _mm256_hadd_ps(sum_simd, sum_simd);
-								sum_simd = _mm256_hadd_ps(sum_simd, sum_simd);
-								__m256 rsum = _mm256_permute2f128_ps(sum_simd, sum_simd, 0 << 4 | 1);
-								sum_simd = _mm256_unpacklo_ps(sum_simd, rsum);
-								sum_simd = _mm256_hadd_ps(sum_simd, sum_simd);
-								// ここまでが水平演算
-								__declspec(align(32)) float sum[8];
-								_mm256_store_ps(sum, sum_simd);
-								output_picture_y[o][y][x] += sum[0];
 							}
 						}
 					}
 					// バイアスを掛ける
-					for(auto y = 0; y < y_size_; ++y){
-						for(auto x = 0; x < x_size_; ++x){
-							output_picture_y[o][y][x] += step_data->bias[o];
+					for(auto y = 0; y < input_size_y_; ++y) {
+						for(auto x = 0; x < input_size_x_SIMD; ++x) {
+							PackedFloat *temp_simd = &output_picture_y[(o * input_size_y + y) * input_size_x_SIMD + x];
+							*temp_simd = PackedAdd(*temp_simd, step->bias[o]);
 						}
 					}
 				}
-				// 次ステップのために調整する
-				for(auto o = 0; o < output_plane_size; ++o){
-					for(auto y = 0; y < y_size_; ++y){
-						for(auto x = 0; x < x_size_; ++x){
-							input_picture_y[o][y][x] = output_picture_y[o][y][x];
-							if(input_picture_y[o][y][x] < 0.0f) input_picture_y[o][y][x] *= 0.1f;
+				// 出力平面を入力平面に反映する
+				for(auto o = 0; o < output_plane_size; ++o) {
+					for(auto y = 0; y < input_size_y_; ++y) {
+						for(auto x = 0; x < input_size_x_SIMD; ++x) {
+							// 「負数のみ0.1倍」をSIMDで高速化している
+							Alignment float sum[SIMD];
+							PackedFloat *temp_simd = &output_picture_y[(o * input_size_y + y) * input_size_x_SIMD + x];
+							PackedFloat lt_zero = PackedCmpLt(*temp_simd, kZeroSIMD);	//各要素について0.0未満なら0xFFFFFFFF、でないと0にする
+							*temp_simd = PackedBrend(*temp_simd, PackedMul(*temp_simd, kConstSIMD), lt_zero);
+							PackedStore(sum, *temp_simd);
+							for(auto k = 0; k < SIMD; ++k) {
+								input_picture_y[(o * input_size_y + y) * input_size_x + (x * SIMD + k)] = sum[k];
+							}
 						}
 					}
 				}
-				x_size_ -= 2;
-				y_size_ -= 2;
+				input_size_y_ -= 2;
 			}
 			/* 出力部分 */
-			x_size_base -= margin_size; y_size_base -= margin_size;
-			for(auto y = 0; y < y_size_base; y++) {
-				int y_ = block_pos_y * block_ + y;
-				auto ycp = fpip->ycp_edit + y_ * fpip->max_w + block_pos_x * block_;
-				for(auto x = 0; x < x_size_base; x++) {
-					ycp->y = static_cast<short>(round(input_picture_y[0][y][x] * 4096));
+			for(auto y = 0; y < output_size_y; ++y) {
+				int y_ = block_pos_y * block_size_y + y;
+				auto ycp = fpip->ycp_edit + y_ * fpip->max_w + block_pos_x * block_size_x;
+				for(auto x = 0; x < output_size_x; ++x) {
+					ycp->y = static_cast<short>(round(input_picture_y[y * input_size_x + x] * 4096));
 					ycp++;
 				}
 			}
-			x_size -= margin_size; y_size -= margin_size;
+			/* メモリを解放する */
+			_mm_free(output_picture_y);
+			_mm_free(input_picture_y);
 		}
 	}
+
+	/* 忘れずにメモリを解放する */
+	_mm_free(padded_picture);
+	return;
 }
