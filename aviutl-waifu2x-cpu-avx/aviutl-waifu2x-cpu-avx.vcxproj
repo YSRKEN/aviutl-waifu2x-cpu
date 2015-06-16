@@ -96,6 +96,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="filter.h" />
+    <ClInclude Include="simd.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
