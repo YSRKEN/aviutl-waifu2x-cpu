@@ -30,14 +30,14 @@ AviUtlなので32bitバイナリを作成してください。
 toolフォルダ内にjsoncnv.exeがありますが、これで元々のJSONデータを変換しています。
 JSONデータの解釈には[picojson.h](https://github.com/kazuho/picojson)を使用しました。
 そうして出来たモデルデータ(バイナリ)のフォーマットは次の通りです。(左のパターンがX個並ぶことを{X}と表す)
- * <出力ファイル> ::= <model>{S}
- * <model>  ::= <nInputPlane(I)> <nOutputPlane(O)> <weight> <bias>
- * <weight>   ::= <weight_1>{O}
- * <weight_1> ::= <weight_2>{I}
- * <weight_2> ::= <weight_3>{kH}
- * <weight_3> ::= <weight_4>{kW}
- * <weight_4> ::= <Real Number>
- * <bias> ::= <Real Number)>{O}
+ * [出力ファイル] ::= [model]{S}
+ * [model]    ::= [nInputPlane(I)] [nOutputPlane(O)] [weight] [bias]
+ * [weight]   ::= [weight_1]{O}
+ * [weight_1] ::= [weight_2]{I}
+ * [weight_2] ::= [<weight_3]{kH}
+ * [weight_3] ::= [weight_4]{kW}
+ * [weight_4] ::= [Real Number]
+ * [bias] ::= [Real Number]{O}
  * ※変換過程で、ステップ数＝7、kW＝kH＝3だと仮定しています
 変換する際は、コマンドライン引数を次のように設定します。
 「jsoncnv {変換したいjsonファイル} {出力後のdatファイル}」
