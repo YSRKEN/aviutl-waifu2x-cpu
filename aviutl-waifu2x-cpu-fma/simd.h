@@ -6,7 +6,7 @@
 #define PackedSetZero _mm256_setzero_ps
 #define PackedAdd     _mm256_add_ps
 #define PackedMul     _mm256_mul_ps
-#define PackedLoad    _mm256_loadu_ps
+#define PackedLoad    _mm256_load_ps
 #define PackedStore   _mm256_store_ps
 #define PackedBrend   _mm256_blendv_ps
 #define Alignment     __declspec(align(32))

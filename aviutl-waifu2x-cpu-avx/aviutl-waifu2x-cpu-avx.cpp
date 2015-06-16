@@ -1,4 +1,4 @@
-/* waifu2x-cpu Ver.1.3.1 by YSR */
+/* waifu2x-cpu Ver.1.3.2 by YSR */
 
 /* プリプロセッサ */
 #pragma warning( disable: 4018)
@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 // Windows依存
 #include <tchar.h>
 #include <windows.h>
@@ -23,6 +24,7 @@
 using std::stod;
 using std::stoi;
 using std::string;
+using std::vector;
 
 /* Typedef宣言 */
 typedef uint32_t Int;
@@ -61,7 +63,7 @@ FILTER_DLL filter = {
 	func_proc, func_init, NULL, NULL, NULL,
 	NULL, NULL,
 	NULL, NULL,
-	"waifu2x-cpu version 1.3.1 by YSR",
+	"waifu2x-cpu version 1.3.2 by YSR",
 	NULL, NULL,
 };
 // 1ステップにおけるデータ
@@ -104,6 +106,23 @@ struct Model {
 			}
 		}
 	}
+};
+//独自アロケータ
+template<class T>
+class AllocSIMD: public std::allocator <T> {
+public:
+	AllocSIMD() { }
+	AllocSIMD(const AllocSIMD& x) { }
+	template<class U>
+	AllocSIMD(const AllocSIMD<U>& x) { }
+	pointer allocate(size_type n, const_pointer hint = 0) {
+		return (pointer)_mm_malloc(n * sizeof(T), alignment_size);
+	}
+	void deallocate(pointer ptr, size_type n) {
+		_mm_free(ptr);
+	}
+	template<class U>
+	struct rebind { typedef AllocSIMD<U> other; };
 };
 
 /* プロトタイプ宣言 */
@@ -176,7 +195,7 @@ BOOL func_proc(FILTER *fp, FILTER_PROC_INFO *fpip) {
 			SetWindowText(fp->hwnd, _T(title_bar.str().c_str()));
 		}
 	}
-	catch(...) {
+	catch(std::bad_alloc&) {
 		if(!fp->exfunc->is_saving(fpip->editp)) {
 			SetWindowText(fp->hwnd, _T(kSoftName));
 			MessageBox(NULL, "メモリが確保できませんでした。", kSoftName, MB_OK);
@@ -255,8 +274,7 @@ void SetFilter(FILTER_PROC_INFO *fpip, const int mode_, const int thread_, const
 	// Y成分を[0,1]に正規化する
 	auto padded_picture_x = kSteps + fpip->w + padding_x;
 	auto padded_picture_y = kSteps + fpip->h + padding_y;
-	float *padded_picture = (float*)_mm_malloc(sizeof(float) * padded_picture_y * padded_picture_x, alignment_size);
-	if(padded_picture == NULL) throw 0;
+	vector<float> padded_picture(padded_picture_y * padded_picture_x);
 	for(auto y = 0; y < fpip->h; y++) {
 		auto ycp = fpip->ycp_edit + y * fpip->max_w;
 		for(auto x = 0; x < fpip->w; x++) {
@@ -355,25 +373,16 @@ void SetFilter(FILTER_PROC_INFO *fpip, const int mode_, const int thread_, const
 				input_size_x_SIMD = input_size_x / SIMD;
 			}
 			/* 入力部分 */
-			float *input_picture_y = (float*)_mm_malloc(sizeof(float) * kMaxInput * input_size_y * input_size_x, alignment_size);
-			if(input_picture_y == NULL){
-				_mm_free(padded_picture);
-				throw 0;
-			}
+			vector<vector<vector<float, AllocSIMD<float>>>> input_picture_y(kMaxInput, vector<vector<float, AllocSIMD<float>>>(input_size_y, vector<float, AllocSIMD<float>>(input_size_x)));
 			for(auto y = 0; y < input_size_y; y++) {
 				for(auto x = 0; x < input_size_x; ++x) {
-					input_picture_y[y * input_size_x + x] = padded_picture[(block_pos_y * block_size_y + y) * padded_picture_x + (block_pos_x * block_size_x + x)];
+					input_picture_y[0][y][x] = padded_picture[(block_pos_y * block_size_y + y) * padded_picture_x + (block_pos_x * block_size_x + x)];
 				}
 			}
 			/* 演算部分 */
 			// 縦サイズはステップ毎に2づつ減っていくが横サイズは減らない。
 			// これは、横サイズを折角SIMD向けに処理幅で割り切れるようにしたのに潰されたくないため。
-			PackedFloat *output_picture_y = (PackedFloat*)_mm_malloc(sizeof(PackedFloat) * kMaxOutput * input_size_y * input_size_x_SIMD, alignment_size);
-			if(output_picture_y == NULL){
-				_mm_free(padded_picture);
-				_mm_free(input_picture_y);
-				throw 0;
-			}
+			vector<vector<vector<float, AllocSIMD<float>>>> output_picture_y(kMaxOutput, vector<vector<float, AllocSIMD<float>>>(input_size_y, vector<float, AllocSIMD<float>>(input_size_x)));
 			auto input_size_y_ = input_size_y - 2;
 			for(auto s = 0; s < kSteps; ++s) {
 				Step *step = &g_model_data[mode_].step[s];
@@ -382,61 +391,63 @@ void SetFilter(FILTER_PROC_INFO *fpip, const int mode_, const int thread_, const
 				// 出力平面を初期化する
 				for(auto o = 0; o < output_plane_size; ++o) {
 					for(auto y = 0; y < input_size_y_; ++y) {
-						for(auto x = 0; x < input_size_x_SIMD; ++x) {
-							output_picture_y[(o * input_size_y + y) * input_size_x_SIMD + x] = PackedSetZero();
+						for(auto x = 0; x < input_size_x; ++x) {
+							output_picture_y[o][y][x] = 0.0f;
 						}
 					}
 				}
 				// 出力平面を生成する
-#pragma omp parallel for num_threads(thread_)
+				#pragma omp parallel for num_threads(thread_)
 				for(auto o = 0; o < output_plane_size; ++o) {
 					// 畳み込み演算する
 					for(auto i = 0; i < input_plane_size; ++i) {
 						for(auto y = 0; y < input_size_y_; ++y) {
-							for(auto x = 0, x_SIMD = 0; x < input_size_x; x += SIMD, ++x_SIMD) {
+							for(auto x = 0; x < input_size_x; x += SIMD) {
 								// 読み込み
 								PackedFloat input_simd[kFilterSize];
 								PackedFloat *weight = step->weight_simd[o][i];
-								input_simd[0 * kWidthSize + 0] = PackedLoad(&input_picture_y[(i * input_size_y + (y + 0)) * input_size_x + (x + 0)]);
-								input_simd[0 * kWidthSize + 1] = PackedLoad(&input_picture_y[(i * input_size_y + (y + 0)) * input_size_x + (x + 1)]);
-								input_simd[0 * kWidthSize + 2] = PackedLoad(&input_picture_y[(i * input_size_y + (y + 0)) * input_size_x + (x + 2)]);
-								input_simd[1 * kWidthSize + 0] = PackedLoad(&input_picture_y[(i * input_size_y + (y + 1)) * input_size_x + (x + 0)]);
-								input_simd[1 * kWidthSize + 1] = PackedLoad(&input_picture_y[(i * input_size_y + (y + 1)) * input_size_x + (x + 1)]);
-								input_simd[1 * kWidthSize + 2] = PackedLoad(&input_picture_y[(i * input_size_y + (y + 1)) * input_size_x + (x + 2)]);
-								input_simd[2 * kWidthSize + 0] = PackedLoad(&input_picture_y[(i * input_size_y + (y + 2)) * input_size_x + (x + 0)]);
-								input_simd[2 * kWidthSize + 1] = PackedLoad(&input_picture_y[(i * input_size_y + (y + 2)) * input_size_x + (x + 1)]);
-								input_simd[2 * kWidthSize + 2] = PackedLoad(&input_picture_y[(i * input_size_y + (y + 2)) * input_size_x + (x + 2)]);
+								input_simd[0 * kWidthSize + 0] = PackedLoad(&input_picture_y[i][y + 0][x + 0]);
+								input_simd[0 * kWidthSize + 1] = PackedLoad(&input_picture_y[i][y + 0][x + 1]);
+								input_simd[0 * kWidthSize + 2] = PackedLoad(&input_picture_y[i][y + 0][x + 2]);
+								input_simd[1 * kWidthSize + 0] = PackedLoad(&input_picture_y[i][y + 1][x + 0]);
+								input_simd[1 * kWidthSize + 1] = PackedLoad(&input_picture_y[i][y + 1][x + 1]);
+								input_simd[1 * kWidthSize + 2] = PackedLoad(&input_picture_y[i][y + 1][x + 2]);
+								input_simd[2 * kWidthSize + 0] = PackedLoad(&input_picture_y[i][y + 2][x + 0]);
+								input_simd[2 * kWidthSize + 1] = PackedLoad(&input_picture_y[i][y + 2][x + 1]);
+								input_simd[2 * kWidthSize + 2] = PackedLoad(&input_picture_y[i][y + 2][x + 2]);
 								// 演算・書き込み
-								PackedFloat *temp_simd = &output_picture_y[(o * input_size_y + y) * input_size_x_SIMD + x_SIMD];
-								*temp_simd = PackedFMA(weight[0], input_simd[0], *temp_simd);
-								*temp_simd = PackedFMA(weight[1], input_simd[1], *temp_simd);
-								*temp_simd = PackedFMA(weight[2], input_simd[2], *temp_simd);
-								*temp_simd = PackedFMA(weight[3], input_simd[3], *temp_simd);
-								*temp_simd = PackedFMA(weight[4], input_simd[4], *temp_simd);
-								*temp_simd = PackedFMA(weight[5], input_simd[5], *temp_simd);
-								*temp_simd = PackedFMA(weight[6], input_simd[6], *temp_simd);
-								*temp_simd = PackedFMA(weight[7], input_simd[7], *temp_simd);
-								*temp_simd = PackedFMA(weight[8], input_simd[8], *temp_simd);
+								PackedFloat temp_simd = PackedLoad(&output_picture_y[o][y][x]);
+								temp_simd = PackedFMA(weight[0], input_simd[0], temp_simd);
+								temp_simd = PackedFMA(weight[1], input_simd[1], temp_simd);
+								temp_simd = PackedFMA(weight[2], input_simd[2], temp_simd);
+								temp_simd = PackedFMA(weight[3], input_simd[3], temp_simd);
+								temp_simd = PackedFMA(weight[4], input_simd[4], temp_simd);
+								temp_simd = PackedFMA(weight[5], input_simd[5], temp_simd);
+								temp_simd = PackedFMA(weight[6], input_simd[6], temp_simd);
+								temp_simd = PackedFMA(weight[7], input_simd[7], temp_simd);
+								temp_simd = PackedFMA(weight[8], input_simd[8], temp_simd);
+								PackedStore(&output_picture_y[o][y][x], temp_simd);
 							}
 						}
 					}
 					// バイアスを掛ける
 					for(auto y = 0; y < input_size_y_; ++y) {
-						for(auto x = 0; x < input_size_x_SIMD; ++x) {
-							PackedFloat *temp_simd = &output_picture_y[(o * input_size_y + y) * input_size_x_SIMD + x];
-							*temp_simd = PackedAdd(*temp_simd, step->bias[o]);
+						for(auto x = 0; x < input_size_x; x += SIMD) {
+							PackedFloat temp_simd = PackedLoad(&output_picture_y[o][y][x]);
+							temp_simd = PackedAdd(temp_simd, step->bias[o]);
+							PackedStore(&output_picture_y[o][y][x], temp_simd);
 						}
 					}
 				}
 				// 出力平面を入力平面に反映する
 				for(auto o = 0; o < output_plane_size; ++o) {
 					for(auto y = 0; y < input_size_y_; ++y) {
-						for(auto x = 0; x < input_size_x_SIMD; ++x) {
+						for(auto x = 0; x < input_size_x; x += SIMD) {
 							// 「負数のみ0.1倍」をSIMDで高速化している
-							PackedFloat *temp_simd = &output_picture_y[(o * input_size_y + y) * input_size_x_SIMD + x];
-							PackedFloat lt_zero = PackedCmpLt(*temp_simd, kZeroSIMD);	//各要素について0.0未満なら0xFFFFFFFF、でないと0にする
-							*temp_simd = PackedBrend(*temp_simd, PackedMul(*temp_simd, kConstSIMD), lt_zero);
-							PackedStore(&input_picture_y[(o * input_size_y + y) * input_size_x + (x * SIMD)], *temp_simd);
+							PackedFloat temp_simd = PackedLoad(&output_picture_y[o][y][x]);
+							PackedFloat lt_zero = PackedCmpLt(temp_simd, kZeroSIMD);	//各要素について0.0未満なら0xFFFFFFFF、でないと0にする
+							temp_simd = PackedBrend(temp_simd, PackedMul(temp_simd, kConstSIMD), lt_zero);
+							PackedStore(&input_picture_y[o][y][x], temp_simd);
 						}
 					}
 				}
@@ -447,17 +458,11 @@ void SetFilter(FILTER_PROC_INFO *fpip, const int mode_, const int thread_, const
 				int y_ = block_pos_y * block_size_y + y;
 				auto ycp = fpip->ycp_edit + y_ * fpip->max_w + block_pos_x * block_size_x;
 				for(auto x = 0; x < output_size_x; ++x) {
-					ycp->y = static_cast<short>(round(input_picture_y[y * input_size_x + x] * 4096));
+					ycp->y = static_cast<short>(round(input_picture_y[0][y][x] * 4096));
 					ycp++;
 				}
 			}
-			/* メモリを解放する */
-			_mm_free(output_picture_y);
-			_mm_free(input_picture_y);
 		}
 	}
-
-	/* 忘れずにメモリを解放する */
-	_mm_free(padded_picture);
 	return;
 }
