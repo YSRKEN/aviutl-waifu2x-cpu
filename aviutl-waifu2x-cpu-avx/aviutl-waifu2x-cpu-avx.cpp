@@ -1,4 +1,4 @@
-/* waifu2x-cpu Ver.1.3.2 by YSR */
+/* waifu2x-cpu Ver.1.3.3 by YSR */
 
 /* プリプロセッサ */
 #pragma warning( disable: 4018)
@@ -63,7 +63,7 @@ FILTER_DLL filter = {
 	func_proc, func_init, NULL, NULL, NULL,
 	NULL, NULL,
 	NULL, NULL,
-	"waifu2x-cpu version 1.3.2 by YSR",
+	"waifu2x-cpu version 1.3.3 by YSR",
 	NULL, NULL,
 };
 // 1ステップにおけるデータ
@@ -373,81 +373,57 @@ void SetFilter(FILTER_PROC_INFO *fpip, const int mode_, const int thread_, const
 				input_size_x_SIMD = input_size_x / SIMD;
 			}
 			/* 入力部分 */
-			vector<vector<vector<float, AllocSIMD<float>>>> input_picture_y(kMaxInput, vector<vector<float, AllocSIMD<float>>>(input_size_y, vector<float, AllocSIMD<float>>(input_size_x)));
+			vector<vector<float, AllocSIMD<float>>> input_picture_y(input_size_y, vector<float, AllocSIMD<float>>(kMaxInput * input_size_x));
 			for(auto y = 0; y < input_size_y; y++) {
 				for(auto x = 0; x < input_size_x; ++x) {
-					input_picture_y[0][y][x] = padded_picture[(block_pos_y * block_size_y + y) * padded_picture_x + (block_pos_x * block_size_x + x)];
+					input_picture_y[y][x] = padded_picture[(block_pos_y * block_size_y + y) * padded_picture_x + (block_pos_x * block_size_x + x)];
 				}
 			}
 			/* 演算部分 */
 			// 縦サイズはステップ毎に2づつ減っていくが横サイズは減らない。
 			// これは、横サイズを折角SIMD向けに処理幅で割り切れるようにしたのに潰されたくないため。
-			vector<vector<vector<float, AllocSIMD<float>>>> output_picture_y(kMaxOutput, vector<vector<float, AllocSIMD<float>>>(input_size_y, vector<float, AllocSIMD<float>>(input_size_x)));
+			vector<vector<PackedFloat, AllocSIMD<PackedFloat>>> output_picture_y(input_size_y, vector<PackedFloat, AllocSIMD<PackedFloat>>(input_size_x_SIMD * kMaxOutput));
 			auto input_size_y_ = input_size_y - 2;
 			for(auto s = 0; s < kSteps; ++s) {
 				Step *step = &g_model_data[mode_].step[s];
 				auto input_plane_size = step->input_plane_size;
 				auto output_plane_size = step->output_plane_size;
-				// 出力平面を初期化する
-				for(auto o = 0; o < output_plane_size; ++o) {
-					for(auto y = 0; y < input_size_y_; ++y) {
-						for(auto x = 0; x < input_size_x; ++x) {
-							output_picture_y[o][y][x] = 0.0f;
-						}
-					}
-				}
 				// 出力平面を生成する
 				#pragma omp parallel for num_threads(thread_)
-				for(auto o = 0; o < output_plane_size; ++o) {
-					// 畳み込み演算する
-					for(auto i = 0; i < input_plane_size; ++i) {
-						for(auto y = 0; y < input_size_y_; ++y) {
-							for(auto x = 0; x < input_size_x; x += SIMD) {
+				for (auto y = 0; y < input_size_y_; ++y) {
+					for (auto x = 0, x_SIMD = 0, x_ = 0; x < input_size_x; x += SIMD, ++x_SIMD, x_ += kMaxOutput) {
+						for (auto o = 0; o < output_plane_size; ++o) {
+							// 出力平面を初期化する
+							PackedFloat temp_simd = PackedSetZero();
+							// 畳み込み演算する
+							for (auto i = 0, i_ = 0; i < input_plane_size; ++i, i_ += input_size_x) {
 								// 読み込み
-								PackedFloat input_simd[kFilterSize];
 								PackedFloat *weight = step->weight_simd[o][i];
-								input_simd[0 * kWidthSize + 0] = PackedLoad(&input_picture_y[i][y + 0][x + 0]);
-								input_simd[0 * kWidthSize + 1] = PackedLoad(&input_picture_y[i][y + 0][x + 1]);
-								input_simd[0 * kWidthSize + 2] = PackedLoad(&input_picture_y[i][y + 0][x + 2]);
-								input_simd[1 * kWidthSize + 0] = PackedLoad(&input_picture_y[i][y + 1][x + 0]);
-								input_simd[1 * kWidthSize + 1] = PackedLoad(&input_picture_y[i][y + 1][x + 1]);
-								input_simd[1 * kWidthSize + 2] = PackedLoad(&input_picture_y[i][y + 1][x + 2]);
-								input_simd[2 * kWidthSize + 0] = PackedLoad(&input_picture_y[i][y + 2][x + 0]);
-								input_simd[2 * kWidthSize + 1] = PackedLoad(&input_picture_y[i][y + 2][x + 1]);
-								input_simd[2 * kWidthSize + 2] = PackedLoad(&input_picture_y[i][y + 2][x + 2]);
 								// 演算・書き込み
-								PackedFloat temp_simd = PackedLoad(&output_picture_y[o][y][x]);
-								temp_simd = PackedFMA(weight[0], input_simd[0], temp_simd);
-								temp_simd = PackedFMA(weight[1], input_simd[1], temp_simd);
-								temp_simd = PackedFMA(weight[2], input_simd[2], temp_simd);
-								temp_simd = PackedFMA(weight[3], input_simd[3], temp_simd);
-								temp_simd = PackedFMA(weight[4], input_simd[4], temp_simd);
-								temp_simd = PackedFMA(weight[5], input_simd[5], temp_simd);
-								temp_simd = PackedFMA(weight[6], input_simd[6], temp_simd);
-								temp_simd = PackedFMA(weight[7], input_simd[7], temp_simd);
-								temp_simd = PackedFMA(weight[8], input_simd[8], temp_simd);
-								PackedStore(&output_picture_y[o][y][x], temp_simd);
+								temp_simd = PackedFMA(weight[0], PackedLoad(&input_picture_y[y + 0][i_ + x + 0]), temp_simd);
+								temp_simd = PackedFMA(weight[1], PackedLoad(&input_picture_y[y + 0][i_ + x + 1]), temp_simd);
+								temp_simd = PackedFMA(weight[2], PackedLoad(&input_picture_y[y + 0][i_ + x + 2]), temp_simd);
+								temp_simd = PackedFMA(weight[3], PackedLoad(&input_picture_y[y + 1][i_ + x + 0]), temp_simd);
+								temp_simd = PackedFMA(weight[4], PackedLoad(&input_picture_y[y + 1][i_ + x + 1]), temp_simd);
+								temp_simd = PackedFMA(weight[5], PackedLoad(&input_picture_y[y + 1][i_ + x + 2]), temp_simd);
+								temp_simd = PackedFMA(weight[6], PackedLoad(&input_picture_y[y + 2][i_ + x + 0]), temp_simd);
+								temp_simd = PackedFMA(weight[7], PackedLoad(&input_picture_y[y + 2][i_ + x + 1]), temp_simd);
+								temp_simd = PackedFMA(weight[8], PackedLoad(&input_picture_y[y + 2][i_ + x + 2]), temp_simd);
 							}
-						}
-					}
-					// バイアスを掛ける
-					for(auto y = 0; y < input_size_y_; ++y) {
-						for(auto x = 0; x < input_size_x; x += SIMD) {
-							PackedFloat temp_simd = PackedLoad(&output_picture_y[o][y][x]);
+							// バイアスを掛ける
 							temp_simd = PackedAdd(temp_simd, step->bias[o]);
-							PackedStore(&output_picture_y[o][y][x], temp_simd);
+							// 負数のみ0.1倍する
+							PackedFloat lt_zero = PackedCmpLt(temp_simd, kZeroSIMD);	//各要素について0.0未満なら0xFFFFFFFF、でないと0にする
+							output_picture_y[y][x_ + o] = PackedBrend(temp_simd, PackedMul(temp_simd, kConstSIMD), lt_zero);
 						}
 					}
 				}
 				// 出力平面を入力平面に反映する
-				for(auto o = 0; o < output_plane_size; ++o) {
-					for(auto y = 0; y < input_size_y_; ++y) {
-						for(auto x = 0; x < input_size_x; x += SIMD) {
-							// 「負数のみ0.1倍」をSIMDで高速化している
-							PackedFloat temp_simd = PackedLoad(&output_picture_y[o][y][x]);
-							PackedFloat lt_zero = PackedCmpLt(temp_simd, kZeroSIMD);	//各要素について0.0未満なら0xFFFFFFFF、でないと0にする
-							temp_simd = PackedBrend(temp_simd, PackedMul(temp_simd, kConstSIMD), lt_zero);
-							PackedStore(&input_picture_y[o][y][x], temp_simd);
+				#pragma omp parallel for num_threads(thread_)
+				for (auto y = 0; y < input_size_y_; ++y) {
+					for (auto o = 0, o_ = 0; o < output_plane_size; ++o, o_ += input_size_x) {
+						for (auto x = 0, x_SIMD = 0, x_ = 0; x < input_size_x; x += SIMD, ++x_SIMD, x_ += kMaxOutput) {
+							PackedStore(&input_picture_y[y][o_ + x], output_picture_y[y][x_ + o]);
 						}
 					}
 				}
@@ -458,7 +434,7 @@ void SetFilter(FILTER_PROC_INFO *fpip, const int mode_, const int thread_, const
 				int y_ = block_pos_y * block_size_y + y;
 				auto ycp = fpip->ycp_edit + y_ * fpip->max_w + block_pos_x * block_size_x;
 				for(auto x = 0; x < output_size_x; ++x) {
-					ycp->y = static_cast<short>(round(input_picture_y[0][y][x] * 4096));
+					ycp->y = static_cast<short>(round(input_picture_y[y][x] * 4096));
 					ycp++;
 				}
 			}

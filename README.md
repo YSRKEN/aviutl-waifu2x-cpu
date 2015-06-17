@@ -48,6 +48,9 @@ sampleフォルダにはサンプル画像を置いてあります。
 ……piaproがCC BY-NCで出してる奴だから問題ないよね？
 
 ##更新履歴
+Ver.1.3.3
+ * メモリの確保方法を最適化したのでVer.1.3.1並(倍速)になった
+
 Ver.1.3.2
  * メモリの確保方法を見直したので、あまりブロックに分割しなくても処理できるようになった
  * そのせいで多少高速化したかもしれない
@@ -84,4 +87,3 @@ Ver.1.0
  * 「[x86 SIMD Technique:: 水平加算での合計計算](http://www.kaede-software.com/2014/04/post_641.html)」
  * 「[インテル® C++ コンパイラー XE 13.1 ユーザー・リファレンス・ガイド](http://nf.nci.org.au/facilities/software/intel-ct/13.5.192/Documentation/ja_JP/compiler_c/main_cls/index.htm)」
  * 「[STLのコンテナで自作のallocatorを使う](http://d.hatena.ne.jp/sorayukinoyume/20121017/1350473588)」
- 
