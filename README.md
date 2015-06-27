@@ -1,6 +1,7 @@
-#aviutl-waifu2x-cpu
+﻿#aviutl-waifu2x-cpu
 waifu2xの処理を行うことが可能な、AviUtlのフィルタプラグインです。
 [aviutl-waifu2x-cpu_kai](https://github.com/YSRKEN/aviutl-waifu2x-cpu_kai)と統合したので、RGBで処理できるようになりました。
+また、実写画像にも対応できるようになりました。
 
 ##インストール
  * aviutl-waifu2x-cpu-***.aufとmodelsフォルダを、aviutl.exeと同じフォルダにあるpluginsフォルダにコピーしてください。
