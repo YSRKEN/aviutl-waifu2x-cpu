@@ -11,7 +11,7 @@
 #define PackedAnd     _mm_and_ps
 #define PackedOr      _mm_or_ps
 #define PackedLoad    _mm_loadu_ps
-#define PackedStore   _mm_store_ps
+#define PackedStore   _mm_storeu_ps
 #define Alignment     __declspec(align(16))
 
 /* typedeféŒ¾ */
